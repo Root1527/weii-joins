@@ -1,4 +1,4 @@
-this project partially used ai for reformatting and converting to rust btw
+this project partially used ai btw
 
 To start make sure to edit the config.
 
