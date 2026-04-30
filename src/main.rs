@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+use std::fs;
 
 use chrono::Local;
 use configparser::ini::Ini;
@@ -12,13 +13,12 @@ use log::{error, info, warn, LevelFilter};
 use regex::Regex;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, AsyncSeekExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command as TokioCommand};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-// Constants
 const BAIT_IDS: &[&str] = &[
     "770c5942369c5f42900b2217cab4b36d",
     "26668376643207895634992344001537",
@@ -39,7 +39,7 @@ const ROBLOX_GAME_ID: &str = "15532962292";
 
 struct LdProcess {
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
 }
 
 struct Sniper {
@@ -68,7 +68,6 @@ impl Sniper {
 			.unwrap_or(&fallback)
             .join("config.ini");
         
-        // If relative from exe fails, try relative from current dir
         if !config_path.exists() {
             config.load("config.ini").unwrap_or_default();
         } else {
@@ -92,10 +91,11 @@ impl Sniper {
         )).unwrap();
         
         let link_pattern_share = Regex::new(r"https://.*roblox\.com/share\?code=.*type=Server").unwrap();
+		
         let emu_pattern = Regex::new(r"emulator-[0-9]{4}").unwrap();
 
         let blacklist_pattern = Regex::new(
-            "need|want|lf|look|stop|how|bait|snip|fak|pl|hunt|sho|sea|wait|tho|gone|think|ago|prob|try|dev|adm|see|cap|tot|is|us|giv|get|hav|and|str|br|rai|wi|san|star|null|pm|gra|pump|moon|hea|scr|mac|do|did|jk|rep|dm|farm|sum|who|if|imag|pro|bot|whe|next|post|was"
+            "need|want|lf|look|bait|fak|pl|gone|dev|adm|see|giv|get|hav|and|str|br|rai|wi|san|star|null|jk"
         ).unwrap();
 
         let word_patterns = vec![
@@ -215,6 +215,8 @@ impl Sniper {
             self._join_windows(server_code, choice_id).await;
         }
         info!("{} link found!", self.words[choice_id]);
+		
+		self._check_logs(use_ldplayer, choice_id).await;
     }
 
     async fn _send_webhook_notification(&self, choice_id: usize, server_code: &str) {
@@ -255,33 +257,177 @@ impl Sniper {
             Err(e) => error!("Failed to send webhook: {}", e),
         }
     }
+	
+	async fn _check_logs(&self, use_ldplayer: bool, choice_id: usize) {
+		if use_ldplayer {
+			let mut output_list = self.output_list.lock().await;
+			let mut handles = Vec::new();
 
-    async fn _join_ldplayer(&self, server_code: &str, choice_id: usize) {
-        let share_link_found = *self.share_link_found.lock().await;
-        let final_link = if !share_link_found {
-            format!(r"roblox://placeID={}\&linkCode={}", ROBLOX_GAME_ID, server_code)
-        } else {
-            format!(r"roblox://navigation/share_links?code={}\&type=Server", server_code)
-        };
+			for proc in output_list.iter_mut() {
+				let shell_command = "logcat -T 1 | grep  --line-buffered -F 'BloxstrapRPC'\n";
+				if let Err(e) = proc.stdin.write_all(shell_command.as_bytes()).await {
+					error!("Failed to write to ADB stdin: {}", e);
+					continue;
+				}
 
-        let shell_command = format!("am start -a android.intent.action.VIEW {}\n", final_link);
-        let data = shell_command.as_bytes();
+				if let Some(mut stdout) = proc.stdout.take() {
+					let target_word = self.words[choice_id].to_lowercase();
+					let adb_path = self.adb_path.clone();
 
-        let mut output_list = self.output_list.lock().await;
-        for proc in output_list.iter_mut() {
-            if let Err(e) = proc.stdin.write_all(data).await {
-                error!("Failed to write to ADB stdin: {}", e);
-                continue;
-            }
-            let mut line = String::new();
-            if let Ok(n) = proc.stdout.read_line(&mut line).await {
-                if n > 0 {
-                    info!("{}", line.trim());
-                }
-            }
-        }
-        self._send_webhook_notification(choice_id, server_code).await;
-    }
+					let handle = tokio::spawn(async move {
+						loop {
+							let mut line = String::new();
+							match stdout.read_line(&mut line).await {
+								Ok(0) => {
+									info!("ADB stdout stream closed.");
+									break;
+								}
+								Ok(_) => {
+									let trimmed = line.trim();
+									if let Some(json_start) = trimmed.find('{') {
+										let json_str = &trimmed[json_start..];
+										if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+											if let Some(hover_text) = parsed["data"]["largeImage"]["hoverText"].as_str() {
+												info!("Current Biome: {}", hover_text);
+												if hover_text.to_lowercase() != target_word {
+													info!("Closing Roblox...");
+													let _ = StdCommand::new(&adb_path)
+														.args(["shell", "am", "force-stop", "com.roblox.client"])
+														.spawn();
+												}
+												return;
+											}
+										}
+									}
+								}
+								Err(e) => {
+									error!("Failed to read from ADB stdout: {}", e);
+									break;
+								}
+							}
+						}
+					});
+					handles.push(handle);
+				}
+			}
+			
+		drop(output_list);
+			for handle in handles {
+				let _ = handle.await;
+			}
+		} else {
+			let target_word = self.words[choice_id].to_lowercase();
+
+			tokio::spawn(async move {
+				let log_dir = match std::env::var("LOCALAPPDATA") {
+					Ok(appdata) => PathBuf::from(appdata).join("Roblox").join("logs"),
+					Err(_) => {
+						error!("Could not read %LOCALAPPDATA%");
+						return;
+					}
+				};
+
+				let latest_log = std::fs::read_dir(&log_dir)
+					.ok()
+					.and_then(|entries| {
+						entries
+							.filter_map(|e| e.ok())
+							.filter(|e| {
+								e.path().extension().and_then(|x| x.to_str()) == Some("log")
+							})
+							.max_by_key(|e| {
+								e.metadata().and_then(|m| m.modified()).ok()
+							})
+							.map(|e| e.path())
+					});
+
+				let log_path = match latest_log {
+					Some(p) => p,
+					None => {
+						error!("No Roblox log files found in {:?}", log_dir);
+						return;
+					}
+				};
+
+				let file = match tokio::fs::File::open(&log_path).await {
+					Ok(f) => f,
+					Err(e) => {
+						error!("Failed to open log file: {}", e);
+						return;
+					}
+				};
+
+				let mut reader = BufReader::new(file);
+
+				use tokio::io::AsyncSeekExt;
+				let _ = reader.seek(std::io::SeekFrom::End(0)).await;
+
+				loop {
+					let mut line = String::new();
+					match reader.read_line(&mut line).await {
+						Ok(0) => {
+							tokio::time::sleep(Duration::from_millis(200)).await;
+						}
+						Ok(_) => {
+							let trimmed = line.trim();
+							if trimmed.contains("BloxstrapRPC") {
+								if let Some(json_start) = trimmed.find('{') {
+									let json_str = &trimmed[json_start..];
+									if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+										if let Some(hover_text) = parsed["data"]["largeImage"]["hoverText"].as_str() {
+											info!("Current Biome: {}", hover_text);
+											if hover_text.to_lowercase() != target_word {
+												info!("Closing Roblox...");
+												let _ = StdCommand::new("cmd")
+													.args(["/C", "taskkill", "/IM", "RobloxPlayerBeta.exe", "/F"])
+													.spawn();
+											}
+											return;
+										}
+									}
+								}
+							}
+						}
+						Err(e) => {
+							error!("Failed to read log file: {}", e);
+							return;
+						}
+					}
+				}
+			});
+		}
+	}
+		
+async fn _join_ldplayer(&self, server_code: &str, choice_id: usize) {
+		let share_link_found = *self.share_link_found.lock().await;
+		let final_link = if !share_link_found {
+			format!(r"roblox://placeID={}\&linkCode={}", ROBLOX_GAME_ID, server_code)
+		} else {
+			format!(r"roblox://navigation/share_links?code={}\&type=Server", server_code)
+		};
+
+		let shell_command = format!("am start -a android.intent.action.VIEW {}\n", final_link);
+		let data = shell_command.as_bytes();
+
+		let mut output_list = self.output_list.lock().await;
+		for proc in output_list.iter_mut() {
+			if let Err(e) = proc.stdin.write_all(data).await {
+				error!("Failed to write to ADB stdin: {}", e);
+				continue;
+			}
+
+			if let Some(stdout) = proc.stdout.as_mut() {
+				let mut line = String::new();
+				if let Ok(n) = stdout.read_line(&mut line).await {
+					if n > 0 {
+						info!("{}", line.trim());
+					}
+				}
+			}
+		}
+
+		self._send_webhook_notification(choice_id, server_code).await;
+	}
 
     async fn _join_windows(&self, server_code: &str, choice_id: usize) {
         let share_link_found = *self.share_link_found.lock().await;
@@ -364,7 +510,10 @@ impl Sniper {
                         if let Ok(mut child) = shell_proc {
                             let stdin = child.stdin.take().unwrap();
                             let stdout = BufReader::new(child.stdout.take().unwrap());
-                            output_list.push(LdProcess { stdin, stdout });
+							output_list.push(LdProcess {
+								stdin,
+								stdout: Some(stdout), // <-- wrap in Some
+							});
                         }
                     }
                 } else {
