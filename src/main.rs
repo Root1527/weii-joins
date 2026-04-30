@@ -19,10 +19,6 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-const BAIT_IDS: &[&str] = &[
-    "770c5942369c5f42900b2217cab4b36d",
-    "26668376643207895634992344001537",
-];
 
 const DISCORD_WS_BASE: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const GUILD_ID: &str = "1186570213077041233";
@@ -52,7 +48,6 @@ struct Sniper {
     link_pattern: Regex,
     link_pattern_share: Regex,
     emu_pattern: Regex,
-    blacklist_pattern: Regex,
     word_patterns: Vec<Regex>,
     activated_index: Vec<usize>,
     http_client: Client,
@@ -94,10 +89,6 @@ impl Sniper {
 		
         let emu_pattern = Regex::new(r"emulator-[0-9]{4}").unwrap();
 
-        let blacklist_pattern = Regex::new(
-            "need|want|lf|look|bait|fak|pl|gone|dev|adm|see|giv|get|hav|and|str|br|rai|wi|san|star|null|jk"
-        ).unwrap();
-
         let word_patterns = vec![
             Regex::new(r"c[orru]+p").unwrap(),
             Regex::new(r"jest[er]+| ob[livo]+n").unwrap(),
@@ -117,7 +108,6 @@ impl Sniper {
             link_pattern,
             link_pattern_share,
             emu_pattern,
-            blacklist_pattern,
             word_patterns,
             activated_index: Vec::new(),
             http_client: Client::new(),
@@ -181,12 +171,7 @@ impl Sniper {
             return false;
         }
 
-        if self.blacklist_pattern.is_match(&msg_lower) {
-            info!("Filtered message! content: {}", message);
-            return false;
-        }
-
-        true
+        return true;
     }
 
     async fn _extract_server_code(&self, message: &str) -> Option<String> {
@@ -454,11 +439,6 @@ async fn _join_ldplayer(&self, server_code: &str, choice_id: usize) {
             Some(code) => code,
             None => return,
         };
-
-        if BAIT_IDS.iter().any(|&id| id == server_code) {
-            info!("Known bait detected, ignoring message.");
-            return;
-        }
 
         info!("Found message! content: {}", content);
         self._handle_server_join(choice_id, &server_code).await;
