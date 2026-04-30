@@ -1,6 +1,6 @@
 [package]
 name = "weii_joins_rust"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 
 [lib]
@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = "0.4.44"
+dirs = "5.0"
 configparser = "3.1.0"
 env_logger = "0.11.10"
 futures-util = "0.3.32"
