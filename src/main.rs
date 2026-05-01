@@ -90,12 +90,12 @@ impl Sniper {
         let emu_pattern = Regex::new(r"emulator-[0-9]{4}").unwrap();
 
         let word_patterns = vec![
-            Regex::new(r"c[orru]+p").unwrap(),
-            Regex::new(r"jest[er]+| ob[livo]+n").unwrap(),
+            Regex::new(r"c[orr]+.+up").unwrap(),
+            Regex::new(r"jes.+[ter]+").unwrap(),
             Regex::new(r"rin").unwrap(),
-            Regex::new(r"g[litc]+h").unwrap(),
-            Regex::new(r"d[rea]+m").unwrap(),
-            Regex::new(r"c[yb]+[er]+").unwrap(),
+            Regex::new(r"g[lit]+.+ch").unwrap(),
+            Regex::new(r"ds|dr[ea]+.+ms").unwrap(),
+            Regex::new(r"cy[b]?.+[er]+s").unwrap(),
         ];
 
         Self {
